@@ -55,7 +55,8 @@ class KinodynamicRRTStar:
         self.connect_circle_dist = connect_circle_dist
         self.start.cost = 0.0
         self.nodes = [self.start]
-        self.max_steering_time = 5.0
+        self.max_acceleration_x = 1.0
+        self.max_acceleration_y = 1.0
         self.epsilon = 0.1
         if seed is not None:
             random.seed(seed)

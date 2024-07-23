@@ -55,7 +55,10 @@ class KinodynamicRRTStar:
         self.connect_circle_dist = connect_circle_dist
         self.start.cost = 0.0
         self.nodes = [self.start]
-        self.max_steering_time = 5.0
+
+        self.max_acceleration_x = 1.0
+        self.max_acceleration_y = 1.0
+
         self.epsilon = 0.1
         if seed is not None:
             random.seed(seed)
@@ -82,7 +85,8 @@ class KinodynamicRRTStar:
         path = [new_node.state]
         total_time = 0.0
 
-        max_acceleration = 1.0  # 최대 가속도
+        max_acceleration_x = self.max_acceleration_x
+        max_acceleration_y = self.max_acceleration_y
 
         # x와 y 방향에 대해 각각 t1, t2 계산
         t1_x, t2_x = self.calculate_t1_t2(
@@ -90,14 +94,14 @@ class KinodynamicRRTStar:
             new_node.state[2],
             to_state[0],
             to_state[2],
-            max_acceleration,
+            max_acceleration_x,
         )
         t1_y, t2_y = self.calculate_t1_t2(
             new_node.state[1],
             new_node.state[3],
             to_state[1],
             to_state[3],
-            max_acceleration,
+            max_acceleration_y,
         )
 
         # t1과 t2가 계산되지 않으면 (해가 없으면) None 반환
@@ -105,26 +109,60 @@ class KinodynamicRRTStar:
             return None
 
         # 전체 제어 시간 계산
-        total_control_time = max(t1_x + t2_x, t1_y + t2_y)
+        total_time_x = t1_x + t2_x
+        total_time_y = t1_y + t2_y
+
+        total_control_time = max(total_time_x, total_time_y)
+
+        x0 = new_node.state[0]
+        v0_x = new_node.state[2]
+
+        y0 = new_node.state[1]
+        v0_y = new_node.state[3]
+
+        v1_x = v0_x + max_acceleration_x * t1_x
+        x1 = x0 + v0_x * t1_x + 0.5 * max_acceleration_x * t1_x**2
+        v2_x = v1_x - max_acceleration_x * t2_x
+        x2 = x1 + v1_x * t2_x - 0.5 * max_acceleration_x * t2_x**2
+
+        v1_y = v0_y + max_acceleration_y * t1_y
+        y1 = y0 + v0_y * t1_y + 0.5 * max_acceleration_y * t1_y**2
+        v2_y = v1_y - max_acceleration_y * t2_y
+        y2 = y1 + v1_y * t2_y - 0.5 * max_acceleration_y * t2_y**2
+
+        assert (x2 - to_state[0]) < 1e-6
+        assert (y2 - to_state[1]) < 1e-6
+        assert (v2_x - to_state[2]) < 1e-6
+        assert (v2_y - to_state[3]) < 1e-6
 
         while total_time < total_control_time:
             acc = np.zeros(2)
 
             # x 방향 제어
             if total_time < t1_x:
-                acc[0] = max_acceleration
+                acc[0] = max_acceleration_x
             elif total_time < t1_x + t2_x:
-                acc[0] = -max_acceleration
-            else:
-                acc[0] = 0.0
+                acc[0] = -max_acceleration_x
+            elif total_time >= total_time_x:
+                if total_time_y > total_time_x:
+                    if total_time < total_time_x + (total_time_y - total_time_x) / 2:
+                        acc[0] = -4 * to_state[2] / (total_time_y - total_time_x)
+                    elif total_time_x + (total_time_y - total_time_x) / 2 < total_time:
+                        acc[0] = 4 * to_state[2] / (total_time_y - total_time_x)
+                    print(acc[0])
 
             # y 방향 제어
             if total_time < t1_y:
-                acc[1] = max_acceleration
+                acc[1] = max_acceleration_y
             elif total_time < t1_y + t2_y:
-                acc[1] = -max_acceleration
-            else:
-                acc[1] = 0.0
+                acc[1] = -max_acceleration_y
+            elif total_time >= total_time_y:
+                if total_time_x > total_time_y:
+                    if total_time < total_time_y + (total_time_x - total_time_y) / 2:
+                        acc[1] = -4 * to_state[3] / (total_time_x - total_time_y)
+                    elif total_time_y + (total_time_x - total_time_y) / 2 < total_time:
+                        acc[1] = 4 * to_state[3] / (total_time_x - total_time_y)
+                    print(acc[1])
 
             # 속도 업데이트
             new_vel = new_node.state[2:] + acc * self.dt
@@ -155,10 +193,10 @@ class KinodynamicRRTStar:
 
         # 최종 상태 추가
         if self.is_valid(to_state):
-            new_node.state = to_state
-            path.append(to_state)
-            if callback:
-                callback(path, to_state)
+            # new_node.state = to_state
+            # path.append(to_state)
+            # if callback:
+            #     callback(path, to_state)
 
             new_node.path = np.array(path)
             new_node.cost = from_node.cost + self.calculate_distance(
@@ -267,8 +305,8 @@ class KinodynamicRRTStar:
             print(f"Iteration {i + 1}/{self.max_iter}")
             rnd_state = self.get_random_state()
             nearest_node = self.get_nearest_node(rnd_state)
-            new_node = self.steer(nearest_node, rnd_state, update_steer_path)
-            # new_node = self.steer(nearest_node, rnd_state)
+            # new_node = self.steer(nearest_node, rnd_state, update_steer_path)
+            new_node = self.steer(nearest_node, rnd_state)
             if new_node and self.is_valid(new_node.state):
                 new_node.parent = nearest_node
                 self.nodes.append(new_node)

@@ -75,8 +75,8 @@ class KinodynamicRRTStar:
         self.integral_error_vel = np.zeros(2)
 
         # 적분항 최대값 (anti-windup)
-        self.max_integral_pos = 10.0
-        self.max_integral_vel = 5.0
+        self.max_integral_pos = 1.0
+        self.max_integral_vel = 1.0
 
         self.max_steering_time = float("inf")
         self.epsilon = 0.2
@@ -138,8 +138,6 @@ class KinodynamicRRTStar:
             print(f"Position error: {error_pos}")
             print(f"Velocity error: {error_vel}")
 
-            error = error_pos - 0.5 * self.dt * (to_state[2:] + new_node.state[2:])
-
             # 적분 오차 업데이트
             self.integral_error_pos += error_pos * self.dt
             self.integral_error_vel += error_vel * self.dt
@@ -169,18 +167,12 @@ class KinodynamicRRTStar:
                 + self.kd_vel * derivative_vel
             )
 
-            # acc_pos = (
-            #     2
-            #     * (new_node.state[:2] - to_state[:2] - to_state[2:] * self.dt)
-            #     / (self.dt**2)
-            # )
-            # acc_vel = (new_node.state[2:] - to_state[2:]) / self.dt
-            #
-            # w_pos = 0.5
-            # w_vel = 0.5
-
             # 최종 가속도 계산
-            # acc = w_pos * acc_pos + w_vel * acc_vel
+            # acc = (
+            #     acc_pos
+            #     if np.linalg.norm(acc_pos) > np.linalg.norm(acc_vel * self.dt)
+            #     else acc_vel
+            # )
             acc = acc_pos + acc_vel
             if np.linalg.norm(acc) < 0.001:
                 break
@@ -232,6 +224,7 @@ class KinodynamicRRTStar:
             # 이전 오차 업데이트
             prev_error_pos = error_pos
             prev_error_vel = error_vel
+            prev_acc = acc
 
             total_time += self.dt
 
