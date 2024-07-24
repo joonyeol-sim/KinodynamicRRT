@@ -5,7 +5,6 @@ from matplotlib.patches import Circle
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import random
-from scipy.optimize import minimize
 
 np.set_printoptions(suppress=True, precision=8, floatmode="fixed")
 
@@ -43,7 +42,7 @@ class KinodynamicRRTStar:
         obstacles: List[Tuple[float, float, float]],
         bounds: np.ndarray,
         max_iter: int = 1500,
-        dt: float = 0.05,
+        dt: float = 0.001,
         goal_bias: float = 0.15,
         connect_circle_dist: float = float("inf"),
         seed: Optional[int] = None,
@@ -62,7 +61,7 @@ class KinodynamicRRTStar:
         self.max_acceleration_x = 1.0
         self.max_acceleration_y = 1.0
 
-        self.epsilon = 0.3
+        self.epsilon = 0.5
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
@@ -75,8 +74,7 @@ class KinodynamicRRTStar:
 
         discriminant = b**2 - 4 * a * c
 
-        if discriminant < 0:
-            return None, None
+        assert discriminant >= 0
 
         t1_first = (-b + np.sqrt(discriminant)) / (2 * a)
         t1_second = (-b - np.sqrt(discriminant)) / (2 * a)
@@ -92,74 +90,87 @@ class KinodynamicRRTStar:
 
         return t1, t2
 
+    def binary_search_gamma(self, from_state, to_state, total_control_time, axis):
+        low, high = 0, 1
+        max_acceleration = self.max_acceleration_x if axis == 0 else self.max_acceleration_y
+
+        while high - low > 0.01:  # 충분히 작은 epsilon 값
+            gamma = (low + high) / 2
+            t1, t2 = self.calculate_t1_t2(
+                from_state[axis],
+                from_state[axis + 2],
+                to_state[axis],
+                to_state[axis + 2],
+                gamma * max_acceleration
+            )
+
+            current_time = t1 + t2
+            if abs(current_time - total_control_time) < 0.01:
+                return gamma
+            elif current_time > total_control_time:
+                low = gamma
+            else:
+                high = gamma
+
+        return (low + high) / 2
+
     def steer(self, from_node, to_state, callback=None) -> Optional[Node]:
+        x0, y0, v0_x, v0_y = from_node.state
+        xf, yf, vf_x, vf_y = to_state
+        if v0_x ** 2 + vf_x ** 2 < 2 * self.max_acceleration_x * (x0 - xf) or v0_y ** 2 + vf_y ** 2 < 2 * self.max_acceleration_y * (y0 - yf):
+            return None
+
         new_node = Node(np.copy(from_node.state), from_node)
         path = [new_node.state]
         total_time = 0.0
 
-        max_acceleration_x = self.max_acceleration_x
-        max_acceleration_y = self.max_acceleration_y
-
-        # x와 y 방향에 대해 각각 t1, t2 계산
         t1_x, t2_x = self.calculate_t1_t2(
             new_node.state[0],
             new_node.state[2],
             to_state[0],
             to_state[2],
-            max_acceleration_x,
+            self.max_acceleration_x,
         )
         t1_y, t2_y = self.calculate_t1_t2(
             new_node.state[1],
             new_node.state[3],
             to_state[1],
             to_state[3],
-            max_acceleration_y,
+            self.max_acceleration_y,
         )
 
-        # t1과 t2가 계산되지 않으면 (해가 없으면) None 반환
-        if t1_x is None or t1_y is None:
-            return None
-
-        # 전체 제어 시간 계산
         total_time_x = t1_x + t2_x
         total_time_y = t1_y + t2_y
-
         total_control_time = max(total_time_x, total_time_y)
 
-        gamma_x = 1
-        gamma_y = 1
-        if total_time_x < total_control_time:
-            while total_control_time - total_time_x > 0.01 and gamma_x > 0:
-                t1_x, t2_x = self.calculate_t1_t2(
-                    new_node.state[0],
-                    new_node.state[2],
-                    to_state[0],
-                    to_state[2],
-                    gamma_x * max_acceleration_x,
-                )
-                if t1_x is None:
-                    return None
-                total_time_x = t1_x + t2_x
-                gamma_x -= 0.0001
+        gamma_x = 1 if total_time_x >= total_time_y else self.binary_search_gamma(new_node.state, to_state,
+                                                                                  total_control_time, 0)
+        gamma_y = 1 if total_time_y >= total_time_x else self.binary_search_gamma(new_node.state, to_state,
+                                                                                  total_control_time, 1)
 
-        if total_time_y < total_control_time:
-            while total_control_time - total_time_y > 0.01 and gamma_y > 0:
-                t1_y, t2_y = self.calculate_t1_t2(
-                    new_node.state[1],
-                    new_node.state[3],
-                    to_state[1],
-                    to_state[3],
-                    gamma_y * max_acceleration_y,
-                )
-                if t1_y is None:
-                    return None
-                total_time_y = t1_y + t2_y
-                gamma_y -= 0.0001
-
-        if gamma_x < 0.01 or gamma_y < 0.01:
+        if v0_x ** 2 + vf_x ** 2 < 2 * gamma_x * self.max_acceleration_x * (x0 - xf) or v0_y ** 2 + vf_y ** 2 < 2 * gamma_y * self.max_acceleration_y * (y0 - yf):
             return None
 
-        assert abs(total_time_x - total_time_y) < 0.5
+        t1_x, t2_x = self.calculate_t1_t2(
+            new_node.state[0],
+            new_node.state[2],
+            to_state[0],
+            to_state[2],
+            gamma_x * self.max_acceleration_x,
+        )
+        t1_y, t2_y = self.calculate_t1_t2(
+            new_node.state[1],
+            new_node.state[3],
+            to_state[1],
+            to_state[3],
+            gamma_y * self.max_acceleration_y,
+        )
+
+        total_time_x = t1_x + t2_x
+        total_time_y = t1_y + t2_y
+        total_control_time = max(total_time_x, total_time_y)
+
+        assert abs(total_time_x - total_time_y) < 0.1
 
         x0 = new_node.state[0]
         v0_x = new_node.state[2]
@@ -167,35 +178,34 @@ class KinodynamicRRTStar:
         y0 = new_node.state[1]
         v0_y = new_node.state[3]
 
-        v1_x = v0_x + gamma_x * max_acceleration_x * t1_x
-        x1 = x0 + v0_x * t1_x + 0.5 * gamma_x * max_acceleration_x * t1_x**2
-        v2_x = v1_x - gamma_x * max_acceleration_x * t2_x
-        x2 = x1 + v1_x * t2_x - 0.5 * gamma_x * max_acceleration_x * t2_x**2
+        v1_x = v0_x + gamma_x * self.max_acceleration_x * t1_x
+        x1 = x0 + v0_x * t1_x + 0.5 * gamma_x * self.max_acceleration_x * t1_x**2
+        v2_x = v1_x - gamma_x * self.max_acceleration_x * t2_x
+        x2 = x1 + v1_x * t2_x - 0.5 * gamma_x * self.max_acceleration_x * t2_x**2
 
-        v1_y = v0_y + gamma_y * max_acceleration_y * t1_y
-        y1 = y0 + v0_y * t1_y + 0.5 * gamma_y * max_acceleration_y * t1_y**2
-        v2_y = v1_y - gamma_y * max_acceleration_y * t2_y
-        y2 = y1 + v1_y * t2_y - 0.5 * gamma_y * max_acceleration_y * t2_y**2
+        v1_y = v0_y + gamma_y * self.max_acceleration_y * t1_y
+        y1 = y0 + v0_y * t1_y + 0.5 * gamma_y * self.max_acceleration_y * t1_y**2
+        v2_y = v1_y - gamma_y * self.max_acceleration_y * t2_y
+        y2 = y1 + v1_y * t2_y - 0.5 * gamma_y * self.max_acceleration_y * t2_y**2
 
-        assert abs(x2 - to_state[0]) < 0.5
-        assert abs(y2 - to_state[1]) < 0.5
-        assert abs(v2_x - to_state[2]) < 0.5
-        assert abs(v2_y - to_state[3]) < 0.5
+        generated_state = np.array([x2, y2, v2_x, v2_y])
+
+        assert np.allclose(generated_state, to_state, atol=1e-6)
 
         while total_time < total_control_time:
             acc = np.zeros(2)
 
             # x 방향 제어
             if total_time < t1_x:
-                acc[0] = gamma_x * max_acceleration_x
+                acc[0] = gamma_x * self.max_acceleration_x
             elif total_time < t1_x + t2_x:
-                acc[0] = -gamma_x * max_acceleration_x
+                acc[0] = -gamma_x * self.max_acceleration_x
 
             # y 방향 제어
             if total_time < t1_y:
-                acc[1] = gamma_y * max_acceleration_y
+                acc[1] = gamma_y * self.max_acceleration_y
             elif total_time < t1_y + t2_y:
-                acc[1] = -gamma_y * max_acceleration_y
+                acc[1] = -gamma_y * self.max_acceleration_y
 
             # 속도 업데이트
             new_vel = new_node.state[2:] + acc * self.dt
@@ -225,8 +235,6 @@ class KinodynamicRRTStar:
 
         print(f"New state: {new_node.state}")
         print(f"To state: {to_state}")
-        print(f"Total time: {total_time}")
-        print(f"Total control time: {total_control_time}")
         print(f"Time diff: {total_control_time - (total_time - self.dt)}")
         print(f"Pose Distance: {np.linalg.norm(new_node.state[:2] - to_state[:2])}")
         print(f"Vel Distance: {np.linalg.norm(new_node.state[2:] - to_state[2:])}")
@@ -341,8 +349,8 @@ class KinodynamicRRTStar:
             print(f"Iteration {i + 1}/{self.max_iter}")
             rnd_state = self.get_random_state()
             nearest_node = self.get_nearest_node(rnd_state)
-            new_node = self.steer(nearest_node, rnd_state, update_steer_path)
-            # new_node = self.steer(nearest_node, rnd_state)
+            # new_node = self.steer(nearest_node, rnd_state, update_steer_path)
+            new_node = self.steer(nearest_node, rnd_state)
             if new_node and self.is_valid(new_node.state):
                 new_node.parent = nearest_node
                 self.nodes.append(new_node)
@@ -465,7 +473,7 @@ def main():
         [[-2.0, 12.0], [-2.0, 12.0], [-1.0, 1.0], [-1.0, 1.0]]
     )  # [x_min, x_max], [y_min, y_max], [vx_min, vx_max], [vy_min, vy_max]
     rrt = KinodynamicRRTStar(
-        start, goal, obstacles, bounds, max_iter=1500, goal_bias=0.1
+        start, goal, obstacles, bounds, max_iter=1500, goal_bias=0.1, seed=42,
     )
     path = rrt.plan_with_visualization()
     if path is not None:
