@@ -42,7 +42,7 @@ class KinodynamicRRTStar:
         obstacles: List[Tuple[float, float, float]],
         bounds: np.ndarray,
         max_iter: int = 1500,
-        dt: float = 0.001,
+        dt: float = 0.1,
         goal_bias: float = 0.15,
         connect_circle_dist: float = float("inf"),
         seed: Optional[int] = None,
@@ -61,7 +61,7 @@ class KinodynamicRRTStar:
         self.max_acceleration_x = 1.0
         self.max_acceleration_y = 1.0
 
-        self.epsilon = 0.5
+        self.epsilon = 0.1
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
@@ -70,23 +70,27 @@ class KinodynamicRRTStar:
     def calculate_t1_t2(x0, v0, xf, vf, a_max):
         a = a_max
         b = 2 * v0
-        c = (v0**2 - vf**2) / (2 * a_max) + x0 - xf
+        c = ((v0**2 - vf**2) / (2 * a_max)) + x0 - xf
 
         discriminant = b**2 - 4 * a * c
 
         assert discriminant >= 0
 
         t1_first = (-b + np.sqrt(discriminant)) / (2 * a)
-        t1_second = (-b - np.sqrt(discriminant)) / (2 * a)
+        t1 = t1_first
+        # t1_second = (-b - np.sqrt(discriminant)) / (2 * a)
 
         # 두개의 t1중 양수이면서 더 작은 값을 t1으로 선택
-        t1 = (
-            min(t1_first, t1_second)  # 둘 다 양수인 경우 더 작은 값을 선택
-            if min(t1_first, t1_second) > 0
-            else max(t1_first, t1_second)  # 둘 중 하나만 양수인 경우 양수인 값을 선택
-        )
+        # t1 = (
+        #     min(t1_first, t1_second)  # 둘 다 양수인 경우 더 작은 값을 선택
+        #     if min(t1_first, t1_second) > 0
+        #     else max(t1_first, t1_second)  # 둘 중 하나만 양수인 경우 양수인 값을 선택
+        # )
 
         t2 = (v0 - vf) / a + t1
+
+        if t1 < 0 or t2 < 0:
+            return None, None
 
         return t1, t2
 
@@ -94,7 +98,7 @@ class KinodynamicRRTStar:
         low, high = 0, 1
         max_acceleration = self.max_acceleration_x if axis == 0 else self.max_acceleration_y
 
-        while high - low > 0.01:  # 충분히 작은 epsilon 값
+        while True:  # 충분히 작은 epsilon 값
             gamma = (low + high) / 2
             t1, t2 = self.calculate_t1_t2(
                 from_state[axis],
@@ -104,10 +108,13 @@ class KinodynamicRRTStar:
                 gamma * max_acceleration
             )
 
-            current_time = t1 + t2
-            if abs(current_time - total_control_time) < 0.01:
+            if t1 is None or t2 is None:
+                return None
+
+            total_time = t1 + t2
+            if abs(total_time - total_control_time) < 0.01:
                 return gamma
-            elif current_time > total_control_time:
+            elif total_time > total_control_time:
                 low = gamma
             else:
                 high = gamma
@@ -139,14 +146,18 @@ class KinodynamicRRTStar:
             self.max_acceleration_y,
         )
 
+        if t1_x is None or t1_y is None:
+            return None
         total_time_x = t1_x + t2_x
         total_time_y = t1_y + t2_y
         total_control_time = max(total_time_x, total_time_y)
 
-        gamma_x = 1 if total_time_x >= total_time_y else self.binary_search_gamma(new_node.state, to_state,
+        gamma_x = 1 if total_time_x >= total_control_time else self.binary_search_gamma(new_node.state, to_state,
                                                                                   total_control_time, 0)
-        gamma_y = 1 if total_time_y >= total_time_x else self.binary_search_gamma(new_node.state, to_state,
+        gamma_y = 1 if total_time_y >= total_control_time else self.binary_search_gamma(new_node.state, to_state,
                                                                                   total_control_time, 1)
+        if gamma_x is None or gamma_y is None:
+            return None
 
         if v0_x ** 2 + vf_x ** 2 < 2 * gamma_x * self.max_acceleration_x * (x0 - xf) or v0_y ** 2 + vf_y ** 2 < 2 * gamma_y * self.max_acceleration_y * (y0 - yf):
             return None
@@ -277,9 +288,27 @@ class KinodynamicRRTStar:
         return None
 
     def calculate_distance(self, state1: np.ndarray, state2: np.ndarray) -> float:
-        pos_error = np.linalg.norm(state1[:2] - state2[:2])
-        vel_error = np.linalg.norm(state1[2:] - state2[2:])
-        return pos_error + vel_error
+        x0, y0, v0_x, v0_y = state1
+        xf, yf, vf_x, vf_y = state2
+        if v0_x ** 2 + vf_x ** 2 < 2 * self.max_acceleration_x * (x0 - xf) or v0_y ** 2 + vf_y ** 2 < 2 * self.max_acceleration_y * (y0 - yf):
+            return float("inf")
+
+        t1, t2 = self.calculate_t1_t2(
+            state1[0], state1[2], state2[0], state2[2], self.max_acceleration_x
+        )
+        t3, t4 = self.calculate_t1_t2(
+            state1[1], state1[3], state2[1], state2[3], self.max_acceleration_y
+        )
+        distance = float("inf")
+        if t1 is None and t3 is None:
+            return distance
+        elif t1 is None:
+            distance = t3 + t4
+        elif t3 is None:
+            distance = t1 + t2
+        else:
+            distance = max(t1 + t2, t3 + t4)
+        return distance
 
     def get_nearest_node(self, state: np.ndarray) -> Node:
         distances = [self.calculate_distance(node.state, state) for node in self.nodes]
@@ -473,7 +502,7 @@ def main():
         [[-2.0, 12.0], [-2.0, 12.0], [-1.0, 1.0], [-1.0, 1.0]]
     )  # [x_min, x_max], [y_min, y_max], [vx_min, vx_max], [vy_min, vy_max]
     rrt = KinodynamicRRTStar(
-        start, goal, obstacles, bounds, max_iter=1500, goal_bias=0.1, seed=42,
+        start, goal, obstacles, bounds, max_iter=1500, goal_bias=0.1
     )
     path = rrt.plan_with_visualization()
     if path is not None:
