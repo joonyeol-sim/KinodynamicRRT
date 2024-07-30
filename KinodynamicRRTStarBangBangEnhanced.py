@@ -128,7 +128,7 @@ class KinodynamicRRTStar:
             return None
 
         new_node = Node(np.copy(from_node.state), from_node)
-        path = [new_node.state]
+        path = [np.copy(new_node.state)]
         total_time = 0.0
 
         t1_x, t2_x = self.calculate_t1_t2(
@@ -148,6 +148,7 @@ class KinodynamicRRTStar:
 
         if t1_x is None or t1_y is None:
             return None
+
         total_time_x = t1_x + t2_x
         total_time_y = t1_y + t2_y
         total_control_time = max(total_time_x, total_time_y)
@@ -181,7 +182,9 @@ class KinodynamicRRTStar:
         total_time_y = t1_y + t2_y
         total_control_time = max(total_time_x, total_time_y)
 
-        assert abs(total_time_x - total_time_y) < 0.1
+        assert abs(total_time_x - total_time_y) < 0.01
+
+        ### Checking code ###
 
         x0 = new_node.state[0]
         v0_x = new_node.state[2]
@@ -203,40 +206,84 @@ class KinodynamicRRTStar:
 
         assert np.allclose(generated_state, to_state, atol=1e-6)
 
+        ### Checking code ###
+
+        inflection_x_handled = False
+        inflection_y_handled = False
+
         while total_time < total_control_time:
             acc = np.zeros(2)
+            state_x_updated = False
+            state_y_updated = False
 
             # x 방향 제어
-            if total_time < t1_x:
+            if not inflection_x_handled and total_time >= t1_x:
+                v1_x = v0_x + gamma_x * self.max_acceleration_x * t1_x
+                x1 = x0 + v0_x * t1_x + 0.5 * gamma_x * self.max_acceleration_x * t1_x ** 2
+
+                delta_t = total_time - t1_x
+                vf_x = v1_x - gamma_x * self.max_acceleration_x * delta_t
+                xf = x1 + v1_x * delta_t - 0.5 * gamma_x * self.max_acceleration_x * delta_t ** 2
+
+                new_node.state[0] = xf
+                new_node.state[2] = vf_x
+                acc[0] = -gamma_x * self.max_acceleration_x
+                inflection_x_handled = True
+                state_x_updated = True
+            elif total_time < t1_x:
                 acc[0] = gamma_x * self.max_acceleration_x
             elif total_time < t1_x + t2_x:
                 acc[0] = -gamma_x * self.max_acceleration_x
 
             # y 방향 제어
-            if total_time < t1_y:
+            if not inflection_y_handled and total_time >= t1_y:
+                v1_y = v0_y + gamma_y * self.max_acceleration_y * t1_y
+                y1 = y0 + v0_y * t1_y + 0.5 * gamma_y * self.max_acceleration_y * t1_y ** 2
+
+                delta_t = total_time - t1_y
+                vf_y = v1_y - gamma_y * self.max_acceleration_y * delta_t
+                yf = y1 + v1_y * delta_t - 0.5 * gamma_y * self.max_acceleration_y * delta_t ** 2
+
+                new_node.state[1] = yf
+                new_node.state[3] = vf_y
+                acc[1] = -gamma_y * self.max_acceleration_y
+                inflection_y_handled = True
+                state_y_updated = True
+            elif total_time < t1_y:
                 acc[1] = gamma_y * self.max_acceleration_y
             elif total_time < t1_y + t2_y:
                 acc[1] = -gamma_y * self.max_acceleration_y
 
-            # 속도 업데이트
-            new_vel = new_node.state[2:] + acc * self.dt
+            if state_x_updated and state_y_updated:
+                path.append(np.copy(new_node.state))
+                if callback:
+                    callback(path, to_state)
+                total_time += self.dt
+                continue
+            if state_x_updated:
+                new_node.state[1] += new_node.state[3] * self.dt + 0.5 * acc[1] * self.dt ** 2
+                new_node.state[3] += acc[1] * self.dt
+                path.append(np.copy(new_node.state))
+                if callback:
+                    callback(path, to_state)
+                total_time += self.dt
+                continue
+            if state_y_updated:
+                new_node.state[0] += new_node.state[2] * self.dt + 0.5 * acc[0] * self.dt ** 2
+                new_node.state[2] += acc[0] * self.dt
+                path.append(np.copy(new_node.state))
+                if callback:
+                    callback(path, to_state)
+                total_time += self.dt
+                continue
 
-            # 속도 제한
-            # new_vel = np.clip(new_vel, self.bounds[2, 0], self.bounds[2, 1])
+            new_node.state[0] += new_node.state[2] * self.dt + 0.5 * acc[0] * self.dt ** 2
+            new_node.state[2] += acc[0] * self.dt
+            new_node.state[1] += new_node.state[3] * self.dt + 0.5 * acc[1] * self.dt ** 2
+            new_node.state[3] += acc[1] * self.dt
 
-            # 위치 업데이트
-            new_pos = (
-                new_node.state[:2]
-                + new_node.state[2:] * self.dt
-                + 0.5 * acc * self.dt**2
-            )
-
-            # 새로운 상태 생성
-            new_state = np.concatenate([new_pos, new_vel])
-
-            if self.is_valid(new_state):
-                new_node.state = new_state
-                path.append(new_state)
+            if self.is_valid(new_node.state):
+                path.append(np.copy(new_node.state))
                 if callback:
                     callback(path, to_state)
             else:
@@ -378,8 +425,8 @@ class KinodynamicRRTStar:
             print(f"Iteration {i + 1}/{self.max_iter}")
             rnd_state = self.get_random_state()
             nearest_node = self.get_nearest_node(rnd_state)
-            # new_node = self.steer(nearest_node, rnd_state, update_steer_path)
-            new_node = self.steer(nearest_node, rnd_state)
+            new_node = self.steer(nearest_node, rnd_state, update_steer_path)
+            # new_node = self.steer(nearest_node, rnd_state)
             if new_node and self.is_valid(new_node.state):
                 new_node.parent = nearest_node
                 self.nodes.append(new_node)
@@ -502,7 +549,7 @@ def main():
         [[-2.0, 12.0], [-2.0, 12.0], [-1.0, 1.0], [-1.0, 1.0]]
     )  # [x_min, x_max], [y_min, y_max], [vx_min, vx_max], [vy_min, vy_max]
     rrt = KinodynamicRRTStar(
-        start, goal, obstacles, bounds, max_iter=1500, goal_bias=0.1
+        start, goal, obstacles, bounds, max_iter=1500, goal_bias=0.1, seed=42
     )
     path = rrt.plan_with_visualization()
     if path is not None:
