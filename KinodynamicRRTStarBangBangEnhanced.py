@@ -41,10 +41,10 @@ class KinodynamicRRTStar:
         goal: List[float],
         obstacles: List[Tuple[float, float, float]],
         bounds: np.ndarray,
-        max_iter: int = 1500,
+        max_iter: int = 1000,
         dt: float = 0.1,
         goal_bias: float = 0.15,
-        connect_circle_dist: float = float("inf"),
+        connect_circle_dist: float = 5.0,
         seed: Optional[int] = None,
     ):
         self.start = Node(state=np.array(start, dtype=float))
@@ -65,6 +65,15 @@ class KinodynamicRRTStar:
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
+
+        self.fig, self.ax = plt.subplots(figsize=(10, 10))
+
+        (self.best_path_line,) = self.ax.plot([], [], "r-", linewidth=2, label="Best Path")
+        (self.steer_path_line,) = self.ax.plot(
+            [], [], "y-", linewidth=1, alpha=0.5, label="Steer Path"
+        )
+        (self.to_state_point,) = self.ax.plot([], [], "b*", markersize=10, label="To State")
+        (self.tree_lines,) = self.ax.plot([], [], "go", markersize=2, alpha=0.5)
 
     @staticmethod
     def calculate_t1_t2(x0, v0, xf, vf, a_max):
@@ -190,20 +199,12 @@ class KinodynamicRRTStar:
 
             total_time += self.dt
 
-        print(f"New state: {new_node.state}")
-        print(f"To state: {to_state}")
-        print(f"Time diff: {total_control_time - (total_time - self.dt)}")
-        print(f"Pose Distance: {np.linalg.norm(new_node.state[:2] - to_state[:2])}")
-        print(f"Vel Distance: {np.linalg.norm(new_node.state[2:] - to_state[2:])}")
-
         if (np.linalg.norm(new_node.state[:2] - to_state[:2]) < self.epsilon) and (
                 np.linalg.norm(new_node.state[2:] - to_state[2:]) < self.epsilon
         ):
             new_node.path = np.array(path)
-            new_node.cost = from_node.cost + self.calculate_distance(
-                new_node.state, from_node.state
-            )
             return new_node
+
         return None
 
     def is_valid(self, state):
@@ -272,21 +273,17 @@ class KinodynamicRRTStar:
         vel_diff = np.linalg.norm(node.state[2:] - self.goal.state[2:])
         return pos_diff < self.epsilon and vel_diff < self.epsilon
 
-    def choose_parent(self, node: Node, near_nodes: List[Node]) -> Node:
+    def choose_parent(self, state: np.ndarray, near_nodes: List[Node]) -> Node:
         min_cost = float("inf")
         best_parent = None
         for near_node in near_nodes:
-            new_node = self.steer(near_node, node.state)
+            new_node = self.steer(near_node, state)
             if new_node and self.is_valid(new_node.state):
-                cost = new_node.cost
+                cost = near_node.cost + self.calculate_distance(near_node.state, new_node.state)
                 if cost < min_cost:
                     min_cost = cost
                     best_parent = near_node
-                    node = new_node
-        if best_parent:
-            node.parent = best_parent
-            node.cost = min_cost
-        return node
+        return best_parent
 
     def rewire(self, node: Node, near_nodes: List[Node]):
         for near_node in near_nodes:
@@ -300,47 +297,54 @@ class KinodynamicRRTStar:
                         near_node.parent = node
                         near_node.cost = new_cost
                         near_node.path = new_node.path
+                        self.update_plot(self.ax, self.tree_lines)
+    def update_steer_path(self, path, to_state):
+        path = np.array(path)
+        self.steer_path_line.set_data(path[:, 0], path[:, 1])
+        self.to_state_point.set_data([to_state[0]], [to_state[1]])
+        plt.pause(0.01)
+
+    def is_better_path(self, node1: Node, node2: Node) -> bool:
+        if node1 is None:
+            return True
+        return node2.cost < node1.cost
 
     def plan_with_visualization(self):
-        fig, ax = plt.subplots(figsize=(10, 10))
-        self.setup_plot(ax)
-        (tree_lines,) = ax.plot([], [], "go", markersize=2, alpha=0.5)
-        (best_path_line,) = ax.plot([], [], "r-", linewidth=2, label="Best Path")
-        (steer_path_line,) = ax.plot(
-            [], [], "y-", linewidth=1, alpha=0.5, label="Steer Path"
-        )
-        (to_state_point,) = ax.plot([], [], "b*", markersize=10, label="To State")
+        self.setup_plot(self.ax)
         plt.ion()
         plt.show()
-
-        def update_steer_path(path, to_state):
-            path = np.array(path)
-            steer_path_line.set_data(path[:, 0], path[:, 1])
-            to_state_point.set_data([to_state[0]], [to_state[1]])
-            plt.pause(0.01)
 
         best_goal_node = None
         for i in range(self.max_iter):
             print(f"Iteration {i + 1}/{self.max_iter}")
             rnd_state = self.get_random_state()
-            nearest_node = self.get_nearest_node(rnd_state)
-            new_node = self.steer(nearest_node, rnd_state, update_steer_path)
-            # new_node = self.steer(nearest_node, rnd_state)
-            if new_node and self.is_valid(new_node.state):
-                new_node.parent = nearest_node
+            near_nodes = self.get_near_nodes(rnd_state)
+            parent_node = self.choose_parent(rnd_state, near_nodes)
+            # new_node = self.steer(parent_node, rnd_state, update_steer_path)
+            if parent_node:
+                new_node = self.steer(parent_node, rnd_state)
+                new_node.parent = parent_node
+                new_node.cost = parent_node.cost + self.calculate_distance(
+                    parent_node.state, new_node.state
+                )
                 self.nodes.append(new_node)
-                self.update_plot(ax, tree_lines, new_node)
+
+                # rewire
+                self.rewire(new_node, near_nodes)
+
+                self.update_plot(self.ax, self.tree_lines)
                 print(f"New node added at {new_node.state}")
                 if self.is_near_goal(new_node):
                     print("Goal reached!")
-                    best_goal_node = new_node
-                    best_cost = new_node.cost
-                    break
-            if i % 1000 == 0:
+                    if self.is_better_path(best_goal_node, new_node):
+                        best_goal_node = new_node
+                        self.visualize_final_path(self.ax, best_goal_node)
+                        print(f"New best path found with cost: {best_goal_node.cost}")
+            if i % 500 == 0:
                 plt.pause(0.001)
 
         if best_goal_node:
-            self.visualize_final_path(ax, best_goal_node)
+            self.visualize_final_path(self.ax, best_goal_node)
             plt.ioff()
             plt.show()
             return self.get_path(best_goal_node)
@@ -367,10 +371,10 @@ class KinodynamicRRTStar:
         for ox, oy, radius in self.obstacles:
             circle = Circle((ox, oy), radius, color="red", alpha=0.5)
             ax.add_artist(circle)
-        ax.plot(
+        self.start_point, = ax.plot(
             self.start.state[0], self.start.state[1], "go", markersize=10, label="Start"
         )
-        ax.plot(
+        self.goal_point, = ax.plot(
             self.goal.state[0], self.goal.state[1], "ro", markersize=10, label="Goal"
         )
         ax.set_xlim(self.bounds[0])
@@ -380,17 +384,45 @@ class KinodynamicRRTStar:
         ax.grid(True)
         plt.title("Omnidirectional Kinodynamic RRT")
 
-    def update_plot(self, ax, tree_lines, new_node):
-        path = np.array(new_node.path)
-        ax.plot(path[:, 0], path[:, 1], "g-", linewidth=0.5, alpha=0.5)
+    def update_plot(self, ax, tree_lines):
+        # 기존의 엣지만 제거
+        for line in ax.lines:
+            if line not in [self.start_point, self.goal_point, self.best_path_line, self.steer_path_line,
+                            self.to_state_point, tree_lines]:
+                line.remove()
+
+        # 모든 노드와 엣지를 다시 그립니다
+        for node in self.nodes:
+            if node.parent:
+                path = np.array(node.path)
+                ax.plot(path[:, 0], path[:, 1], "g-", linewidth=0.5, alpha=0.5)
+
+        # 노드 위치 업데이트
         x_coords = [node.state[0] for node in self.nodes]
         y_coords = [node.state[1] for node in self.nodes]
         tree_lines.set_data(x_coords, y_coords)
 
+        # 범례 업데이트
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles, labels)
+
+        plt.draw()
+
     def visualize_final_path(self, ax, goal_node):
         path = self.get_path(goal_node)
+
+        # 기존의 최종 경로를 제거
+        for line in ax.lines:
+            if line.get_label() == "Final Path":
+                line.remove()
+
+        # 새로운 최종 경로를 그립니다
         ax.plot(path[:, 0], path[:, 1], "b-", linewidth=2, label="Final Path")
-        ax.legend()
+
+        # 범례 업데이트
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles, labels)
+
         plt.draw()
 
     def animate_path(self, path):
@@ -442,13 +474,13 @@ class KinodynamicRRTStar:
 def main():
     start = [0.0, 0.0, 0.0, 0.0]  # [x, y, vx, vy]
     goal = [10.0, 10.0, 0.0, 0.0]
-    # obstacles = [(2.0, 2.0, 1.0), (5.0, 5.0, 1.5), (8.0, 8.0, 1.5)]  # [x, y, radius]
-    obstacles = []  # [x, y, radius]
+    obstacles = [(2.0, 2.0, 1.0), (5.0, 5.0, 1.5), (8.0, 8.0, 1.5)]  # [x, y, radius]
+    # obstacles = []  # [x, y, radius]
     bounds = np.array(
         [[-2.0, 12.0], [-2.0, 12.0], [-1.0, 1.0], [-1.0, 1.0]]
     )  # [x_min, x_max], [y_min, y_max], [vx_min, vx_max], [vy_min, vy_max]
     rrt = KinodynamicRRTStar(
-        start, goal, obstacles, bounds, max_iter=1500, goal_bias=0.1
+        start, goal, obstacles, bounds, max_iter=500, goal_bias=0.2, seed=42,
     )
     path = rrt.plan_with_visualization()
     if path is not None:
