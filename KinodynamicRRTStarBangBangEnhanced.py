@@ -316,7 +316,7 @@ class KinodynamicRRTStar:
 
         best_goal_node = None
         for i in range(self.max_iter):
-            print(f"Iteration {i + 1}/{self.max_iter}")
+            # print(f"Iteration {i + 1}/{self.max_iter}")
             rnd_state = self.get_random_state()
             near_nodes = self.get_near_nodes(rnd_state)
             parent_node = self.choose_parent(rnd_state, near_nodes)
@@ -333,9 +333,9 @@ class KinodynamicRRTStar:
                 self.rewire(new_node, near_nodes)
 
                 self.update_plot(self.ax, self.tree_lines)
-                print(f"New node added at {new_node.state}")
+                # print(f"New node added at {new_node.state}")
                 if self.is_near_goal(new_node):
-                    print("Goal reached!")
+                    # print("Goal reached!")
                     if self.is_better_path(best_goal_node, new_node):
                         best_goal_node = new_node
                         self.visualize_final_path(self.ax, best_goal_node)
@@ -431,17 +431,20 @@ class KinodynamicRRTStar:
         ax.plot(path[:, 0], path[:, 1], "b-", linewidth=2, alpha=0.5, label="Path")
         (agent,) = ax.plot([], [], "go", markersize=10, label="Agent")
         velocity_arrow = ax.arrow(0, 0, 0, 0, color="r", width=0.05, head_width=0.2)
-        velocity_text = ax.text(0.02, 0.95, "", transform=ax.transAxes)
+        info_text = ax.text(0.02, 0.95, "", transform=ax.transAxes)
+
+        total_time = len(path) * self.dt
 
         def init():
             agent.set_data([], [])
             velocity_arrow.set_visible(False)
-            velocity_text.set_text("")
-            return agent, velocity_arrow, velocity_text
+            info_text.set_text("")
+            return agent, velocity_arrow, info_text
 
         def animate(i):
             nonlocal velocity_arrow
             state = path[i]
+            current_time = i * self.dt
             agent.set_data([state[0]], [state[1]])
             velocity_arrow.remove()
             velocity_arrow = ax.arrow(
@@ -454,8 +457,8 @@ class KinodynamicRRTStar:
                 head_width=0.2,
             )
             velocity = np.linalg.norm(state[2:])
-            velocity_text.set_text(f"Velocity: {velocity:.2f}")
-            return agent, velocity_arrow, velocity_text
+            info_text.set_text(f"Time: {current_time:.2f} / {total_time:.2f} s\nVelocity: {velocity:.2f}")
+            return agent, velocity_arrow, info_text
 
         anim = FuncAnimation(
             fig,
@@ -480,7 +483,7 @@ def main():
         [[-2.0, 12.0], [-2.0, 12.0], [-1.0, 1.0], [-1.0, 1.0]]
     )  # [x_min, x_max], [y_min, y_max], [vx_min, vx_max], [vy_min, vy_max]
     rrt = KinodynamicRRTStar(
-        start, goal, obstacles, bounds, max_iter=500, goal_bias=0.2, seed=42,
+        start, goal, obstacles, bounds, max_iter=500, goal_bias=0.1
     )
     path = rrt.plan_with_visualization()
     if path is not None:
